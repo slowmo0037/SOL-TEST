@@ -349,117 +349,171 @@ function GenerateDigest {
 
 }
 
+
 function Invoke-RtspRequest {
-    <#
-    .SYNOPSIS
-    Sends an RTSP request and returns parsed response with status line and headers.
-    
-    .DESCRIPTION
-    Centralizes RTSP request/response handling with proper timeout control,
-    bounded reads, and consistent resource disposal.
-    #>
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory)]
-        [string]$IP,
-        
-        [Parameter(Mandatory)]
-        [int]$Port,
-        
-        [Parameter(Mandatory)]
-        [string]$Method,
-        
-        [Parameter(Mandatory)]
-        [string]$Uri,
-        
-        [Parameter()]
-        [string[]]$Headers = @(),
-        
-        [Parameter()]
-        [int]$ReceiveTimeoutMs = 200,
-        
-        [Parameter()]
-        [int]$MaxLinesToRead = 50
+        [Parameter(Mandatory)] [string]$IP,
+        [Parameter(Mandatory)] [int]$Port,
+        [Parameter(Mandatory)] [string]$Method,
+        [Parameter(Mandatory)] [string]$Uri,
+        [Parameter()] [string[]]$Headers = @(),
+        [Parameter()] [int]$ReceiveTimeoutMs = 200
     )
     
     $CRLF = [char]13 + [char]10
-    $tcpClient = $null
-    $stream = $null
-    $writer = $null
-    $reader = $null
+    $tcpClient = New-Object System.Net.Sockets.TcpClient
     
     try {
-        # Build the request
-        $requestLines = @("$Method $Uri RTSP/1.0")
-        $requestLines += $Headers
-        $requestLines += ""  # Empty line to end headers
-        $request = ($requestLines -join $CRLF) + $CRLF
-        
-        # Connect and send
-        $tcpClient = New-Object System.Net.Sockets.TcpClient
-        $tcpClient.ReceiveTimeout = $ReceiveTimeoutMs
-        $tcpClient.Connect($IP, $Port)
-        
+        # CRITICAL FIX: Enforce connection timeout (Connect is normally blocking)
+        $connect = $tcpClient.BeginConnect($IP, $Port, $null, $null)
+        $wait = $connect.AsyncWaitHandle.WaitOne($ReceiveTimeoutMs, $false)
+        if (-not $wait) { throw "Connection Timeout" }
+        $tcpClient.EndConnect($connect)
+
         $stream = $tcpClient.GetStream()
-        $stream.ReadTimeout = $ReceiveTimeoutMs  # Set stream timeout as well
+        $stream.ReadTimeout = $ReceiveTimeoutMs
         $writer = New-Object System.IO.StreamWriter($stream)
+        
+        $request = "$Method $Uri RTSP/1.0$CRLF" + ($Headers -join $CRLF) + "$CRLF$CRLF"
         $writer.Write($request)
         $writer.Flush()
         
-        # Read response with bounded line count
         $reader = New-Object System.IO.StreamReader($stream)
-        $statusLine = $null
-        $responseHeaders = @()
-        $linesRead = 0
-        
-        # Read status line
-        if (!$reader.EndOfStream -and $linesRead -lt $MaxLinesToRead) {
-            $statusLine = $reader.ReadLine()
-            $linesRead++
-        }
-        
-        # Read headers until blank line or limit
-        while (!$reader.EndOfStream -and $linesRead -lt $MaxLinesToRead) {
+        $statusLine = $reader.ReadLine()
+        $resHeaders = @()
+        while (!$reader.EndOfStream) {
             $line = $reader.ReadLine()
-            $linesRead++
-            
-            if ([string]::IsNullOrWhiteSpace($line)) {
-                break  # End of headers
-            }
-            
-            $responseHeaders += $line
+            if ([string]::IsNullOrWhiteSpace($line)) { break }
+            $resHeaders += $line
         }
         
         return [PSCustomObject]@{
-            StatusLine = $statusLine
-            Headers    = $responseHeaders
             Success    = $statusLine -match 'RTSP/1\.0 (\d{3})'
-            StatusCode = if ($statusLine -match 'RTSP/1\.0 (\d{3})') { [int]$matches[1] } else { 0 }
-            IP         = $IP
-            Port       = $Port
-            Uri        = $Uri
+            StatusCode = if ($statusLine -match '(\d{3})') { [int]$matches[1] } else { 0 }
+            Headers    = $resHeaders
+            StatusLine = $statusLine
         }
-        
     }
     catch {
-        return [PSCustomObject]@{
-            StatusLine = $null
-            Headers    = @()
-            Success    = $false
-            StatusCode = 0
-            IP         = $IP
-            Port       = $Port
-            Uri        = $Uri
-            Error      = $_.Exception.Message
-        }
+        return [PSCustomObject]@{ Success = $false; StatusCode = 0; Headers = @(); Error = $_.Exception.Message }
     }
     finally {
-        if ($null -ne $reader) { $reader.Dispose() }
-        if ($null -ne $writer) { $writer.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-        if ($null -ne $tcpClient) { $tcpClient.Dispose() }
+        if ($tcpClient) { $tcpClient.Close(); $tcpClient.Dispose() }
     }
 }
+
+# function Invoke-RtspRequest {
+#     <#
+#     .SYNOPSIS
+#     Sends an RTSP request and returns parsed response with status line and headers.
+    
+#     .DESCRIPTION
+#     Centralizes RTSP request/response handling with proper timeout control,
+#     bounded reads, and consistent resource disposal.
+#     #>
+#     [CmdletBinding()]
+#     param (
+#         [Parameter(Mandatory)]
+#         [string]$IP,
+        
+#         [Parameter(Mandatory)]
+#         [int]$Port,
+        
+#         [Parameter(Mandatory)]
+#         [string]$Method,
+        
+#         [Parameter(Mandatory)]
+#         [string]$Uri,
+        
+#         [Parameter()]
+#         [string[]]$Headers = @(),
+        
+#         [Parameter()]
+#         [int]$ReceiveTimeoutMs = 200,
+        
+#         [Parameter()]
+#         [int]$MaxLinesToRead = 50
+#     )
+    
+#     $CRLF = [char]13 + [char]10
+#     $tcpClient = $null
+#     $stream = $null
+#     $writer = $null
+#     $reader = $null
+    
+#     try {
+#         # Build the request
+#         $requestLines = @("$Method $Uri RTSP/1.0")
+#         $requestLines += $Headers
+#         $requestLines += ""  # Empty line to end headers
+#         $request = ($requestLines -join $CRLF) + $CRLF
+        
+#         # Connect and send
+#         $tcpClient = New-Object System.Net.Sockets.TcpClient
+#         $tcpClient.ReceiveTimeout = $ReceiveTimeoutMs
+#         $tcpClient.Connect($IP, $Port)
+        
+#         $stream = $tcpClient.GetStream()
+#         $stream.ReadTimeout = $ReceiveTimeoutMs  # Set stream timeout as well
+#         $writer = New-Object System.IO.StreamWriter($stream)
+#         $writer.Write($request)
+#         $writer.Flush()
+        
+#         # Read response with bounded line count
+#         $reader = New-Object System.IO.StreamReader($stream)
+#         $statusLine = $null
+#         $responseHeaders = @()
+#         $linesRead = 0
+        
+#         # Read status line
+#         if (!$reader.EndOfStream -and $linesRead -lt $MaxLinesToRead) {
+#             $statusLine = $reader.ReadLine()
+#             $linesRead++
+#         }
+        
+#         # Read headers until blank line or limit
+#         while (!$reader.EndOfStream -and $linesRead -lt $MaxLinesToRead) {
+#             $line = $reader.ReadLine()
+#             $linesRead++
+            
+#             if ([string]::IsNullOrWhiteSpace($line)) {
+#                 break  # End of headers
+#             }
+            
+#             $responseHeaders += $line
+#         }
+        
+#         return [PSCustomObject]@{
+#             StatusLine = $statusLine
+#             Headers    = $responseHeaders
+#             Success    = $statusLine -match 'RTSP/1\.0 (\d{3})'
+#             StatusCode = if ($statusLine -match 'RTSP/1\.0 (\d{3})') { [int]$matches[1] } else { 0 }
+#             IP         = $IP
+#             Port       = $Port
+#             Uri        = $Uri
+#         }
+        
+#     }
+#     catch {
+#         return [PSCustomObject]@{
+#             StatusLine = $null
+#             Headers    = @()
+#             Success    = $false
+#             StatusCode = 0
+#             IP         = $IP
+#             Port       = $Port
+#             Uri        = $Uri
+#             Error      = $_.Exception.Message
+#         }
+#     }
+#     finally {
+#         if ($null -ne $reader) { $reader.Dispose() }
+#         if ($null -ne $writer) { $writer.Dispose() }
+#         if ($null -ne $stream) { $stream.Dispose() }
+#         if ($null -ne $tcpClient) { $tcpClient.Dispose() }
+#     }
+# }
 
 function Get-OpenRTSPPorts {
     [CmdletBinding()]
@@ -559,41 +613,35 @@ function Get-OpenRTSPPorts {
 
     return $validIPPorts
 }
-
-
 function Get-AuthType {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory, ValueFromPipeline)]
+        [Parameter(Mandatory=$false, ValueFromPipeline)] # Changed to non-mandatory
         [PSCustomObject[]]$OpenPorts,
 
         [Parameter()]
-        [int]$TimeoutMs = 2500,
+        [int]$TimeoutMs = 2000,
 
         [Parameter()]
         [int]$ThrottleLimit = 15
     )
 
     begin {
-        Write-Host "`n[i] Loading Vendor Path Database..." -ForegroundColor Cyan
-        
-        # Organize paths by vendor for easier maintenance
-        $VendorMap = [ordered]@{
-            "Fake/Probe" = @("TWlpZGVu")
-            "Hikvision"  = @("Streaming/Channels/101", "Streaming/Channels/102", "Streaming/Channels/1", "Streaming/Channels/2", "h264/ch1/main/av_stream", "h264/ch1/sub/av_stream", "ch01/0", "Streaming/Unicast/channels/101")
-            "Dahua"      = @("cam/realmonitor?channel=1&subtype=0", "cam/realmonitor?channel=1&subtype=1", "cam/realmonitor?channel=0&subtype=0", "cam/realmonitor?channel=1&subtype=0&authbasic=64")
-            "Axis"       = @("axis-media/media.amp", "axis-media/media.amp?camera=1", "axis-media/media.amp?videocodec=h264", "axis-media/media.3gp", "rtsp_tunnel")
-            "Reolink"    = @("h264Preview_01_main", "h264Preview_01_sub", "h265Preview_01_main", "preview")
-            "Sony/Pana"  = @("media/video1", "media/video2", "media/video3", "MediaInput/h264", "MediaInput/h264/stream_1", "MediaInput/h264/stream_2", "video1", "video2")
-            "TP-Link"    = @("stream1", "stream2", "videoMain", "videoSub", "live1.sdp", "live2.sdp")
-            "Hanwha"     = @("profile1/media.smp", "profile2/media.smp", "profile3/media.smp", "snwms/live/ch0", "LiveChannel/0/media.smp")
-            "Bosch"      = @("rtsp_tunnel?h264=1", "rtsp_tunnel?h265=1", "line1", "line2", "stream")
-            "XMeye"      = @("live0.264", "live1.264", "user=admin&password=&channel=1&stream=0.sdp", "live/main")
-            "Vivotek"    = @("live.sdp", "video.h264", "video.h265", "control/faststream.jpg?stream=full")
-            "Generic"    = @("1", "0/1", "1/1", "0", "11", "12", "ch0", "ch1", "video", "av0_0", "live", "onvif1", "onvif2", "h264", "h264.sdp", "mpeg4", "mpeg4.sdp", "media.smp", "video.mp4", "img/video.sav", "img/media.sav")
+        # Check if we actually have input
+        if ($null -eq $OpenPorts -or $OpenPorts.Count -eq 0) {
+            return # Exit silently if no ports to check
         }
 
-        # Flatten the map into a searchable list of objects
+        Write-Host "`n[i] Loading Vendor Path Database..." -ForegroundColor Cyan
+        
+        $VendorMap = [ordered]@{
+            "Probe"      = @("TWlpZGVu")
+            "Hikvision"  = @("Streaming/Channels/101", "ch01/0")
+            "Dahua"      = @("cam/realmonitor?channel=1&subtype=0")
+            "Axis"       = @("axis-media/media.amp")
+            "Generic"    = @("stream1", "live.sdp", "1")
+        }
+
         $authTestPaths = foreach ($vendor in $VendorMap.Keys) {
             foreach ($path in $VendorMap[$vendor]) {
                 [PSCustomObject]@{ Path = $path; Vendor = $vendor }
@@ -602,6 +650,7 @@ function Get-AuthType {
     }
 
     process {
+        # Use simple array iteration if not piped
         $results = $OpenPorts | ForEach-Object -Parallel {
             $ip = $_.IPAddress
             $port = $_.Port
@@ -609,76 +658,173 @@ function Get-AuthType {
             $finalObj = $null
             $found = $false
 
-            # Try paths until we get a hit (200 OK or 401 Unauthorized)
             foreach ($item in $allPaths) {
                 if ($found) { break }
 
-                try {
-                    $response = Invoke-RtspRequest -IP $ip -Port $port -Method "DESCRIBE" `
-                        -Uri "rtsp://$ip`:$port/$($item.Path)" -Headers @("CSeq: 1") `
-                        -ReceiveTimeoutMs $using:TimeoutMs
+                $response = Invoke-RtspRequest -IP $ip -Port $port -Method "DESCRIBE" `
+                    -Uri "rtsp://$ip`:$port/$($item.Path)" -ReceiveTimeoutMs $using:TimeoutMs
 
-                    if ($response.Success) {
-                        # Extract Headers
-                        $serverHeader = ($response.Headers | Where-Object { $_ -match "^Server:" }) -replace "^Server:\s*", ""
-                        $authHeader = $response.Headers | Where-Object { $_ -match "^WWW-Authenticate:" }
+                if ($response.Success) {
+                    $authHeader = $response.Headers | Where-Object { $_ -match "WWW-Authenticate" }
+                    $serverHeader = ($response.Headers | Where-Object { $_ -match "^Server:" }) -replace "^Server:\s*", ""
 
-                        # Determine Auth
-                        $authType = switch -regex ($authHeader) {
-                            "(?i)digest" { "Digest" }
-                            "(?i)basic"  { "Basic" }
-                            default { 
-                                if ($response.StatusCode -eq 200) { "None" } 
-                                else { $null } 
-                            }
-                        }
-
-                        # If we got a valid auth response, we can stop checking paths
-                        if ($authType) {
-                            # Use Server header if available, otherwise use our Map Vendor
-                            $vendorName = if (![string]::IsNullOrWhiteSpace($serverHeader)) { $serverHeader.Trim() } else { $item.Vendor }
-
-                            $finalObj = [PSCustomObject]@{
-                                IPAddress     = $ip
-                                Port          = $port
-                                AuthType      = $authType
-                                LikelyVendor  = $vendorName
-                                ResponseCode  = $response.StatusCode
-                                WorkingPath   = $item.Path
-                            }
-                            
-                            $color = if ($authType -eq "None") { "Green" } else { "Yellow" }
-                            Write-Host "[+] $ip`:$port -> $authType ($vendorName)" -ForegroundColor $color
-                            $found = $true
-                        }
+                    $type = switch -regex ($authHeader) {
+                        "digest" { "Digest" }
+                        "basic"  { "Basic" }
+                        default { if ($response.StatusCode -eq 200) { "None" } else { $null } }
                     }
-                } catch { 
-                    # Connection dropped or timeout, move to next path/IP
+
+                    if ($type) {
+                        $finalObj = [PSCustomObject]@{
+                            IPAddress    = $ip
+                            Port         = $port
+                            AuthType     = $type
+                            authType     = $type # Lowcase for script compatibility
+                            LikelyVendor = if ($serverHeader) { $serverHeader } else { $item.Vendor }
+                            WorkingPath  = $item.Path
+                            Status       = "Open"
+                        }
+                        $color = if ($type -eq "None") { "Green" } else { "Yellow" }
+                        Write-Host "[+] $ip`:$port -> $type" -ForegroundColor $color
+                        $found = $true
+                    }
                 }
             }
 
-            # If no paths worked
             if (-not $found) {
                 $finalObj = [PSCustomObject]@{
-                    IPAddress     = $ip
-                    Port          = $port
-                    AuthType      = "Unknown"
-                    LikelyVendor  = "Unknown"
-                    ResponseCode  = "N/A"
-                    WorkingPath   = "N/A"
+                    IPAddress = $ip; Port = $port; AuthType = "Unknown"; authType = "Unknown"; Status = "Open"
                 }
             }
-
-            $finalObj 
+            $finalObj
         } -ThrottleLimit $ThrottleLimit
 
         return $results
     }
 
     end {
-        Write-Host "`n[+] Auth Type Discovery Complete.`n" -ForegroundColor Green
+        Write-Host "`n[+] Auth Type Discovery Complete." -ForegroundColor Green
     }
 }
+
+# function Get-AuthType {
+#     [CmdletBinding()]
+#     param (
+#         [Parameter(Mandatory, ValueFromPipeline)]
+#         [PSCustomObject[]]$OpenPorts,
+
+#         [Parameter()]
+#         [int]$TimeoutMs = 2500,
+
+#         [Parameter()]
+#         [int]$ThrottleLimit = 15
+#     )
+
+#     begin {
+#         Write-Host "`n[i] Loading Vendor Path Database..." -ForegroundColor Cyan
+        
+#         # Organize paths by vendor for easier maintenance
+#         $VendorMap = [ordered]@{
+#             "Fake/Probe" = @("TWlpZGVu")
+#             "Hikvision"  = @("Streaming/Channels/101", "Streaming/Channels/102", "Streaming/Channels/1", "Streaming/Channels/2", "h264/ch1/main/av_stream", "h264/ch1/sub/av_stream", "ch01/0", "Streaming/Unicast/channels/101")
+#             "Dahua"      = @("cam/realmonitor?channel=1&subtype=0", "cam/realmonitor?channel=1&subtype=1", "cam/realmonitor?channel=0&subtype=0", "cam/realmonitor?channel=1&subtype=0&authbasic=64")
+#             "Axis"       = @("axis-media/media.amp", "axis-media/media.amp?camera=1", "axis-media/media.amp?videocodec=h264", "axis-media/media.3gp", "rtsp_tunnel")
+#             "Reolink"    = @("h264Preview_01_main", "h264Preview_01_sub", "h265Preview_01_main", "preview")
+#             "Sony/Pana"  = @("media/video1", "media/video2", "media/video3", "MediaInput/h264", "MediaInput/h264/stream_1", "MediaInput/h264/stream_2", "video1", "video2")
+#             "TP-Link"    = @("stream1", "stream2", "videoMain", "videoSub", "live1.sdp", "live2.sdp")
+#             "Hanwha"     = @("profile1/media.smp", "profile2/media.smp", "profile3/media.smp", "snwms/live/ch0", "LiveChannel/0/media.smp")
+#             "Bosch"      = @("rtsp_tunnel?h264=1", "rtsp_tunnel?h265=1", "line1", "line2", "stream")
+#             "XMeye"      = @("live0.264", "live1.264", "user=admin&password=&channel=1&stream=0.sdp", "live/main")
+#             "Vivotek"    = @("live.sdp", "video.h264", "video.h265", "control/faststream.jpg?stream=full")
+#             "Generic"    = @("1", "0/1", "1/1", "0", "11", "12", "ch0", "ch1", "video", "av0_0", "live", "onvif1", "onvif2", "h264", "h264.sdp", "mpeg4", "mpeg4.sdp", "media.smp", "video.mp4", "img/video.sav", "img/media.sav")
+#         }
+
+#         # Flatten the map into a searchable list of objects
+#         $authTestPaths = foreach ($vendor in $VendorMap.Keys) {
+#             foreach ($path in $VendorMap[$vendor]) {
+#                 [PSCustomObject]@{ Path = $path; Vendor = $vendor }
+#             }
+#         }
+#     }
+
+#     process {
+#         $results = $OpenPorts | ForEach-Object -Parallel {
+#             $ip = $_.IPAddress
+#             $port = $_.Port
+#             $allPaths = $using:authTestPaths
+#             $finalObj = $null
+#             $found = $false
+
+#             # Try paths until we get a hit (200 OK or 401 Unauthorized)
+#             foreach ($item in $allPaths) {
+#                 if ($found) { break }
+
+#                 try {
+#                     $response = Invoke-RtspRequest -IP $ip -Port $port -Method "DESCRIBE" `
+#                         -Uri "rtsp://$ip`:$port/$($item.Path)" -Headers @("CSeq: 1") `
+#                         -ReceiveTimeoutMs $using:TimeoutMs
+
+#                     if ($response.Success) {
+#                         # Extract Headers
+#                         $serverHeader = ($response.Headers | Where-Object { $_ -match "^Server:" }) -replace "^Server:\s*", ""
+#                         $authHeader = $response.Headers | Where-Object { $_ -match "^WWW-Authenticate:" }
+
+#                         # Determine Auth
+#                         $authType = switch -regex ($authHeader) {
+#                             "(?i)digest" { "Digest" }
+#                             "(?i)basic"  { "Basic" }
+#                             default { 
+#                                 if ($response.StatusCode -eq 200) { "None" } 
+#                                 else { $null } 
+#                             }
+#                         }
+
+#                         # If we got a valid auth response, we can stop checking paths
+#                         if ($authType) {
+#                             # Use Server header if available, otherwise use our Map Vendor
+#                             $vendorName = if (![string]::IsNullOrWhiteSpace($serverHeader)) { $serverHeader.Trim() } else { $item.Vendor }
+
+#                             $finalObj = [PSCustomObject]@{
+#                                 IPAddress     = $ip
+#                                 Port          = $port
+#                                 AuthType      = $authType
+#                                 LikelyVendor  = $vendorName
+#                                 ResponseCode  = $response.StatusCode
+#                                 WorkingPath   = $item.Path
+#                             }
+                            
+#                             $color = if ($authType -eq "None") { "Green" } else { "Yellow" }
+#                             Write-Host "[+] $ip`:$port -> $authType ($vendorName)" -ForegroundColor $color
+#                             $found = $true
+#                         }
+#                     }
+#                 } catch { 
+#                     # Connection dropped or timeout, move to next path/IP
+#                 }
+#             }
+
+#             # If no paths worked
+#             if (-not $found) {
+#                 $finalObj = [PSCustomObject]@{
+#                     IPAddress     = $ip
+#                     Port          = $port
+#                     AuthType      = "Unknown"
+#                     LikelyVendor  = "Unknown"
+#                     ResponseCode  = "N/A"
+#                     WorkingPath   = "N/A"
+#                 }
+#             }
+
+#             $finalObj 
+#         } -ThrottleLimit $ThrottleLimit
+
+#         return $results
+#     }
+
+#     end {
+#         Write-Host "`n[+] Auth Type Discovery Complete.`n" -ForegroundColor Green
+#     }
+# }
 
 # function Get-AuthType {
 #     [CmdletBinding()]
