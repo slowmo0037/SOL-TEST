@@ -560,116 +560,236 @@ function Get-OpenRTSPPorts {
     return $validIPPorts
 }
 
+
 function Get-AuthType {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory)]
-        [PSCustomObject[]]$OpenPorts
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [PSCustomObject[]]$OpenPorts,
+
+        [Parameter()]
+        [int]$TimeoutMs = 2500,
+
+        [Parameter()]
+        [int]$ThrottleLimit = 15
     )
 
-    # Use 1st Fake Route, to try and determine auth type, if that fails use a few common ones to try and find the auth type.
-    # Namely, Fake, Axis, Dahua, Hikvision
-    $authTestPath = @("TWlpZGVu", "axis-media/media.amp", "cam/realmonitor", "Streaming/Channels/101")
-    $foundAuth = @()
-
-    Write-Host "`r`nChecking for Auth Types`:`r`n"
-
-    foreach ($openPort in $OpenPorts) {    
-        $ip = $openPort.IPAddress
-        $port = $openPort.Port
-        $authDetected = $false
-        $unknownAuth = $false
-
-        foreach ($testPath in $authTestPath) {
-            if ($authDetected) { break }  # Exit inner loop if auth type found
-
-            $authtyperesult = @()
-            
-            # Use the centralized RTSP helper
-            $response = Invoke-RtspRequest -IP $ip -Port $port -Method "DESCRIBE" `
-                -Uri "rtsp://$ip`:$port/$testPath" -Headers @("CSeq: 1") `
-                -ReceiveTimeoutMs $Timeout
-
-            if ($response.Success) {
-                # Extract Server header for vendor hints
-                $serverHeader = $response.Headers | Where-Object { $_ -match "(?i)^Server:" } | Select-Object -First 1
-                $serverValue = if ($serverHeader -match "(?i)^Server:\s*(.+)$") { $matches[1].Trim() } else { "Unknown" }
-                
-                # Check headers for authentication type
-                $authHeader = $response.Headers | Where-Object { $_ -match "(?i)^WWW-Authenticate:" } | Select-Object -First 1
-                
-                if ($authHeader -match "(?i)\bdigest\b") {
-                    Write-Host -ForegroundColor Yellow -NoNewline "Found Digest`: "
-                    Write-Host "$ip`:$port (Server: $serverValue)"
-                    $authtyperesult += [PSCustomObject]@{
-                        IPAddress = $ip
-                        Port      = $port
-                        Status    = "Open"
-                        authType  = "Digest"
-                        Server    = $serverValue
-                    }
-                    $authDetected = $true
-                } 
-                elseif ($authHeader -match "(?i)\bbasic\b") {
-                    Write-Host -ForegroundColor Yellow -NoNewline "Found Basic`: "
-                    Write-Host "$ip`:$port (Server: $serverValue)"
-                    $authtyperesult += [PSCustomObject]@{
-                        IPAddress = $ip
-                        Port      = $port
-                        Status    = "Open"
-                        authType  = "Basic"
-                        Server    = $serverValue
-                    }
-                    $authDetected = $true
-                }
-                elseif ($response.StatusCode -eq 404) {
-                    $unknownAuth = $true
-                }
-                elseif ($response.StatusCode -eq 200) {
-                    # No auth required
-                    if ($authtyperesult.Count -eq 0) {
-                        Write-Host -ForegroundColor Yellow -NoNewline "Found NoAuth`: "
-                        Write-Host "$ip`:$port (Server: $serverValue)"
-                        $foundAuth += [PSCustomObject]@{
-                            IPAddress = $ip
-                            Port      = $port
-                            Status    = "Open"
-                            authType  = "none"
-                            Server    = $serverValue
-                        }
-                        $authDetected = $true
-                    }
-                }
-            }
-            else {
-                # Connection failed or error
-                $unknownAuth = $true
-            }
-
-            if ($authtyperesult.Count -gt 0) {
-                $foundAuth += $authtyperesult
-            }
+    begin {
+        Write-Host "`n[i] Loading Vendor Path Database..." -ForegroundColor Cyan
+        
+        # Organize paths by vendor for easier maintenance
+        $VendorMap = [ordered]@{
+            "Fake/Probe" = @("TWlpZGVu")
+            "Hikvision"  = @("Streaming/Channels/101", "Streaming/Channels/102", "Streaming/Channels/1", "Streaming/Channels/2", "h264/ch1/main/av_stream", "h264/ch1/sub/av_stream", "ch01/0", "Streaming/Unicast/channels/101")
+            "Dahua"      = @("cam/realmonitor?channel=1&subtype=0", "cam/realmonitor?channel=1&subtype=1", "cam/realmonitor?channel=0&subtype=0", "cam/realmonitor?channel=1&subtype=0&authbasic=64")
+            "Axis"       = @("axis-media/media.amp", "axis-media/media.amp?camera=1", "axis-media/media.amp?videocodec=h264", "axis-media/media.3gp", "rtsp_tunnel")
+            "Reolink"    = @("h264Preview_01_main", "h264Preview_01_sub", "h265Preview_01_main", "preview")
+            "Sony/Pana"  = @("media/video1", "media/video2", "media/video3", "MediaInput/h264", "MediaInput/h264/stream_1", "MediaInput/h264/stream_2", "video1", "video2")
+            "TP-Link"    = @("stream1", "stream2", "videoMain", "videoSub", "live1.sdp", "live2.sdp")
+            "Hanwha"     = @("profile1/media.smp", "profile2/media.smp", "profile3/media.smp", "snwms/live/ch0", "LiveChannel/0/media.smp")
+            "Bosch"      = @("rtsp_tunnel?h264=1", "rtsp_tunnel?h265=1", "line1", "line2", "stream")
+            "XMeye"      = @("live0.264", "live1.264", "user=admin&password=&channel=1&stream=0.sdp", "live/main")
+            "Vivotek"    = @("live.sdp", "video.h264", "video.h265", "control/faststream.jpg?stream=full")
+            "Generic"    = @("1", "0/1", "1/1", "0", "11", "12", "ch0", "ch1", "video", "av0_0", "live", "onvif1", "onvif2", "h264", "h264.sdp", "mpeg4", "mpeg4.sdp", "media.smp", "video.mp4", "img/video.sav", "img/media.sav")
         }
 
-        if ($unknownAuth -and !$authDetected) {
-            Write-Host -ForegroundColor Yellow -NoNewline "Unknown Auth`: "
-            Write-Host "$ip`:$port"
-            $foundAuth += [PSCustomObject]@{
-                IPAddress = $ip
-                Port      = $port
-                Status    = "Open"
-                authType  = "Unknown"
-                Server    = "Unknown"
+        # Flatten the map into a searchable list of objects
+        $authTestPaths = foreach ($vendor in $VendorMap.Keys) {
+            foreach ($path in $VendorMap[$vendor]) {
+                [PSCustomObject]@{ Path = $path; Vendor = $vendor }
             }
         }
     }
 
-    Write-Host -NoNewline -ForegroundColor Green "`r`n[+]"
-    Write-Host " Found Required Auth Types`r`n"
-    Write-Host "=========================================================`r`n"
+    process {
+        $results = $OpenPorts | ForEach-Object -Parallel {
+            $ip = $_.IPAddress
+            $port = $_.Port
+            $allPaths = $using:authTestPaths
+            $finalObj = $null
+            $found = $false
 
-    return $foundAuth
+            # Try paths until we get a hit (200 OK or 401 Unauthorized)
+            foreach ($item in $allPaths) {
+                if ($found) { break }
+
+                try {
+                    $response = Invoke-RtspRequest -IP $ip -Port $port -Method "DESCRIBE" `
+                        -Uri "rtsp://$ip`:$port/$($item.Path)" -Headers @("CSeq: 1") `
+                        -ReceiveTimeoutMs $using:TimeoutMs
+
+                    if ($response.Success) {
+                        # Extract Headers
+                        $serverHeader = ($response.Headers | Where-Object { $_ -match "^Server:" }) -replace "^Server:\s*", ""
+                        $authHeader = $response.Headers | Where-Object { $_ -match "^WWW-Authenticate:" }
+
+                        # Determine Auth
+                        $authType = switch -regex ($authHeader) {
+                            "(?i)digest" { "Digest" }
+                            "(?i)basic"  { "Basic" }
+                            default { 
+                                if ($response.StatusCode -eq 200) { "None" } 
+                                else { $null } 
+                            }
+                        }
+
+                        # If we got a valid auth response, we can stop checking paths
+                        if ($authType) {
+                            # Use Server header if available, otherwise use our Map Vendor
+                            $vendorName = if (![string]::IsNullOrWhiteSpace($serverHeader)) { $serverHeader.Trim() } else { $item.Vendor }
+
+                            $finalObj = [PSCustomObject]@{
+                                IPAddress     = $ip
+                                Port          = $port
+                                AuthType      = $authType
+                                LikelyVendor  = $vendorName
+                                ResponseCode  = $response.StatusCode
+                                WorkingPath   = $item.Path
+                            }
+                            
+                            $color = if ($authType -eq "None") { "Green" } else { "Yellow" }
+                            Write-Host "[+] $ip`:$port -> $authType ($vendorName)" -ForegroundColor $color
+                            $found = $true
+                        }
+                    }
+                } catch { 
+                    # Connection dropped or timeout, move to next path/IP
+                }
+            }
+
+            # If no paths worked
+            if (-not $found) {
+                $finalObj = [PSCustomObject]@{
+                    IPAddress     = $ip
+                    Port          = $port
+                    AuthType      = "Unknown"
+                    LikelyVendor  = "Unknown"
+                    ResponseCode  = "N/A"
+                    WorkingPath   = "N/A"
+                }
+            }
+
+            $finalObj 
+        } -ThrottleLimit $ThrottleLimit
+
+        return $results
+    }
+
+    end {
+        Write-Host "`n[+] Auth Type Discovery Complete.`n" -ForegroundColor Green
+    }
 }
+
+# function Get-AuthType {
+#     [CmdletBinding()]
+#     param (
+#         [Parameter(Mandatory)]
+#         [PSCustomObject[]]$OpenPorts
+#     )
+
+#     # Use 1st Fake Route, to try and determine auth type, if that fails use a few common ones to try and find the auth type.
+#     # Namely, Fake, Axis, Dahua, Hikvision
+#     $authTestPath = @("TWlpZGVu", "axis-media/media.amp", "cam/realmonitor", "Streaming/Channels/101")
+#     $foundAuth = @()
+
+#     Write-Host "`r`nChecking for Auth Types`:`r`n"
+
+#     foreach ($openPort in $OpenPorts) {    
+#         $ip = $openPort.IPAddress
+#         $port = $openPort.Port
+#         $authDetected = $false
+#         $unknownAuth = $false
+
+#         foreach ($testPath in $authTestPath) {
+#             if ($authDetected) { break }  # Exit inner loop if auth type found
+
+#             $authtyperesult = @()
+            
+#             # Use the centralized RTSP helper
+#             $response = Invoke-RtspRequest -IP $ip -Port $port -Method "DESCRIBE" `
+#                 -Uri "rtsp://$ip`:$port/$testPath" -Headers @("CSeq: 1") `
+#                 -ReceiveTimeoutMs $Timeout
+
+#             if ($response.Success) {
+#                 # Extract Server header for vendor hints
+#                 $serverHeader = $response.Headers | Where-Object { $_ -match "(?i)^Server:" } | Select-Object -First 1
+#                 $serverValue = if ($serverHeader -match "(?i)^Server:\s*(.+)$") { $matches[1].Trim() } else { "Unknown" }
+                
+#                 # Check headers for authentication type
+#                 $authHeader = $response.Headers | Where-Object { $_ -match "(?i)^WWW-Authenticate:" } | Select-Object -First 1
+                
+#                 if ($authHeader -match "(?i)\bdigest\b") {
+#                     Write-Host -ForegroundColor Yellow -NoNewline "Found Digest`: "
+#                     Write-Host "$ip`:$port (Server: $serverValue)"
+#                     $authtyperesult += [PSCustomObject]@{
+#                         IPAddress = $ip
+#                         Port      = $port
+#                         Status    = "Open"
+#                         authType  = "Digest"
+#                         Server    = $serverValue
+#                     }
+#                     $authDetected = $true
+#                 } 
+#                 elseif ($authHeader -match "(?i)\bbasic\b") {
+#                     Write-Host -ForegroundColor Yellow -NoNewline "Found Basic`: "
+#                     Write-Host "$ip`:$port (Server: $serverValue)"
+#                     $authtyperesult += [PSCustomObject]@{
+#                         IPAddress = $ip
+#                         Port      = $port
+#                         Status    = "Open"
+#                         authType  = "Basic"
+#                         Server    = $serverValue
+#                     }
+#                     $authDetected = $true
+#                 }
+#                 elseif ($response.StatusCode -eq 404) {
+#                     $unknownAuth = $true
+#                 }
+#                 elseif ($response.StatusCode -eq 200) {
+#                     # No auth required
+#                     if ($authtyperesult.Count -eq 0) {
+#                         Write-Host -ForegroundColor Yellow -NoNewline "Found NoAuth`: "
+#                         Write-Host "$ip`:$port (Server: $serverValue)"
+#                         $foundAuth += [PSCustomObject]@{
+#                             IPAddress = $ip
+#                             Port      = $port
+#                             Status    = "Open"
+#                             authType  = "none"
+#                             Server    = $serverValue
+#                         }
+#                         $authDetected = $true
+#                     }
+#                 }
+#             }
+#             else {
+#                 # Connection failed or error
+#                 $unknownAuth = $true
+#             }
+
+#             if ($authtyperesult.Count -gt 0) {
+#                 $foundAuth += $authtyperesult
+#             }
+#         }
+
+#         if ($unknownAuth -and !$authDetected) {
+#             Write-Host -ForegroundColor Yellow -NoNewline "Unknown Auth`: "
+#             Write-Host "$ip`:$port"
+#             $foundAuth += [PSCustomObject]@{
+#                 IPAddress = $ip
+#                 Port      = $port
+#                 Status    = "Open"
+#                 authType  = "Unknown"
+#                 Server    = "Unknown"
+#             }
+#         }
+#     }
+
+#     Write-Host -NoNewline -ForegroundColor Green "`r`n[+]"
+#     Write-Host " Found Required Auth Types`r`n"
+#     Write-Host "=========================================================`r`n"
+
+#     return $foundAuth
+# }
 
 function Get-ValidRTSPPaths {
     [CmdletBinding()]
